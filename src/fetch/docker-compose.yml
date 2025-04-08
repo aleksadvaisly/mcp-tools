@@ -7,6 +7,6 @@ services:
       - "8383:8383"
     working_dir: /app
     restart: always
-    stdin_open: true  # Pozwala na interaktywne korzystanie z kontenera
-    tty: true  # Włącza terminal (dla Basha)
-    command: ["mcp-proxy", "--sse-port=8383", "uvx", "mcp-server-fetch"]
+    stdin_open: true
+    tty: true
+    command: "--pass-environment --sse-port=8383 --sse-host 0.0.0.0 uvx mcp-server-fetch"
