@@ -16,14 +16,23 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Install mcp proxy which will help to expose service via HTTP
 RUN pip install "mcp-proxy>=0.5.1"
-    
+
+
+
+
 # Then, add the rest of the project source code and install it
 # Installing separately from its dependencies allows optimal layer caching
 ADD . /app
+COPY ./src /app
+RUN rm -frv /app/src/*
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable
+
+RUN uv pip install -e .
 
 # Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"
 
 ENTRYPOINT [ "mcp-proxy" ]
+#CMD ["/bin/bash"]
