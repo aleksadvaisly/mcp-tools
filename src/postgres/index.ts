@@ -63,6 +63,88 @@ const pool = new pg.Pool({
 
 const SCHEMA_PATH = "schema";
 
+// Funkcja do bezpiecznego dzielenia zapytań SQL na średnikach, ignorując średniki wewnątrz stringów i identyfikatorów
+const splitSqlStatements = (fullSql: string): string[] => {
+  const statements: string[] = [];
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBlockComment = false;
+  let inLineComment = false;
+  let currentStatement = '';
+
+  for (let i = 0; i < fullSql.length; i++) {
+    const char = fullSql[i];
+    const nextChar = fullSql[i + 1];
+
+    // Obsługa komentarzy blokowych /* ... */
+    if (char === '/' && nextChar === '*' && !inSingleQuote && !inDoubleQuote && !inLineComment) {
+      inBlockComment = true;
+      currentStatement += char;
+      i++; // Przesuń wskaźnik o jeden, aby pominąć '*'
+      currentStatement += nextChar;
+      continue;
+    }
+    if (char === '*' && nextChar === '/' && inBlockComment) {
+      inBlockComment = false;
+      currentStatement += char;
+      i++; // Przesuń wskaźnik o jeden, aby pominąć '/'
+      currentStatement += nextChar;
+      continue;
+    }
+
+    // Obsługa komentarzy liniowych --
+    if (char === '-' && nextChar === '-' && !inSingleQuote && !inDoubleQuote && !inBlockComment) {
+      inLineComment = true;
+      currentStatement += char;
+      i++; // Przesuń wskaźnik o jeden, aby pominąć '-'
+      currentStatement += nextChar;
+      continue;
+    }
+    if (char === '\n' && inLineComment) {
+      inLineComment = false;
+      currentStatement += char;
+      continue;
+    }
+
+    if (inBlockComment || inLineComment) {
+      currentStatement += char;
+      continue;
+    }
+
+    // Obsługa cudzysłowów pojedynczych
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      currentStatement += char;
+      continue;
+    }
+
+    // Obsługa cudzysłowów podwójnych (dla identyfikatorów)
+    if (char === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      currentStatement += char;
+      continue;
+    }
+
+    // Dzielenie na średnikach poza cudzysłowami
+    if (char === ';' && !inSingleQuote && !inDoubleQuote) {
+      const trimmedStatement = currentStatement.trim();
+      if (trimmedStatement.length > 0) {
+        statements.push(trimmedStatement);
+      }
+      currentStatement = '';
+    } else {
+      currentStatement += char;
+    }
+  }
+
+  // Dodaj ostatnie zapytanie, jeśli istnieje
+  const trimmedLastStatement = currentStatement.trim();
+  if (trimmedLastStatement.length > 0) {
+    statements.push(trimmedLastStatement);
+  }
+  return statements;
+};
+
 // --- Obsługa zasobów (istniejąca logika) ---
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   const client = await pool.connect();
@@ -328,88 +410,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!sql) {
       throw new Error("Missing 'query' argument for sql_dml_engine");
     }
-
-    // Funkcja do bezpiecznego dzielenia zapytań SQL na średnikach, ignorując średniki wewnątrz stringów i identyfikatorów
-    const splitSqlStatements = (fullSql: string): string[] => {
-      const statements: string[] = [];
-      let inSingleQuote = false;
-      let inDoubleQuote = false;
-      let inBlockComment = false;
-      let inLineComment = false;
-      let currentStatement = '';
-
-      for (let i = 0; i < fullSql.length; i++) {
-        const char = fullSql[i];
-        const nextChar = fullSql[i + 1];
-
-        // Obsługa komentarzy blokowych /* ... */
-        if (char === '/' && nextChar === '*' && !inSingleQuote && !inDoubleQuote && !inLineComment) {
-          inBlockComment = true;
-          currentStatement += char;
-          i++; // Przesuń wskaźnik o jeden, aby pominąć '*'
-          currentStatement += nextChar;
-          continue;
-        }
-        if (char === '*' && nextChar === '/' && inBlockComment) {
-          inBlockComment = false;
-          currentStatement += char;
-          i++; // Przesuń wskaźnik o jeden, aby pominąć '/'
-          currentStatement += nextChar;
-          continue;
-        }
-
-        // Obsługa komentarzy liniowych --
-        if (char === '-' && nextChar === '-' && !inSingleQuote && !inDoubleQuote && !inBlockComment) {
-          inLineComment = true;
-          currentStatement += char;
-          i++; // Przesuń wskaźnik o jeden, aby pominąć '-'
-          currentStatement += nextChar;
-          continue;
-        }
-        if (char === '\n' && inLineComment) {
-          inLineComment = false;
-          currentStatement += char;
-          continue;
-        }
-
-        if (inBlockComment || inLineComment) {
-          currentStatement += char;
-          continue;
-        }
-
-        // Obsługa cudzysłowów pojedynczych
-        if (char === "'" && !inDoubleQuote) {
-          inSingleQuote = !inSingleQuote;
-          currentStatement += char;
-          continue;
-        }
-
-        // Obsługa cudzysłowów podwójnych (dla identyfikatorów)
-        if (char === '"' && !inSingleQuote) {
-          inDoubleQuote = !inDoubleQuote;
-          currentStatement += char;
-          continue;
-        }
-
-        // Dzielenie na średnikach poza cudzysłowami
-        if (char === ';' && !inSingleQuote && !inDoubleQuote) {
-          const trimmedStatement = currentStatement.trim();
-          if (trimmedStatement.length > 0) {
-            statements.push(trimmedStatement);
-          }
-          currentStatement = '';
-        } else {
-          currentStatement += char;
-        }
-      }
-
-      // Dodaj ostatnie zapytanie, jeśli istnieje
-      const trimmedLastStatement = currentStatement.trim();
-      if (trimmedLastStatement.length > 0) {
-        statements.push(trimmedLastStatement);
-      }
-      return statements;
-    };
 
     const statements = splitSqlStatements(sql);
     const results: string[] = [];
