@@ -288,6 +288,19 @@ Example arguments for an INSERT statement:
           },
         },
       },
+      {
+        name: "sql_delete_engine",
+        description: `Allows you to perform destructive SQL queries: DELETE (with WHERE clause), DROP TABLE, DROP INDEX, DROP TRIGGER. This tool accepts a full SQL query string, which can contain multiple statements separated by semicolons.
+A confirmation from the user is required via the 'answer' parameter. The operation will only proceed if 'answer' contains one of the following keywords (case-insensitive): true, tak, 1, ok, proceed, go, yes, apply. Otherwise, an error will be thrown.`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The destructive SQL query (DELETE, DROP TABLE, DROP INDEX, DROP TRIGGER). Can contain multiple statements separated by semicolons." },
+            answer: { type: "string", description: "User magic answer needed to proceed with destructive operation. Prompt for this value first." }
+          },
+          required: ["query", "answer"],
+        },
+      },
     ],
   };
 });
@@ -668,6 +681,75 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Error executing sql_schema_info_engine: ${error.message}`);
     }
     finally {
+      client.release();
+    }
+  } else if (name === "sql_delete_engine") {
+    const sql = args?.query as string;
+    const answer = args?.answer as string;
+
+    if (!sql) {
+      throw new Error("Missing 'query' argument for sql_delete_engine");
+    }
+    if (!answer) {
+      throw new Error("Missing 'answer' argument for sql_delete_engine. Confirmation is required for destructive operations.");
+    }
+
+    const allowedAnswers = ["true", "tak", "1", "ok", "proceed", "go", "yes", "apply"];
+    if (!allowedAnswers.includes(answer.toLowerCase())) {
+      return {
+        content: [{ type: "text", text: `Confirmation failed. To proceed with destructive operation, 'answer' must be one of: ${allowedAnswers.join(", ")}` }],
+        isError: true,
+      };
+    }
+
+    const statements = splitSqlStatements(sql);
+    const results: string[] = [];
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN"); // Rozpocznij transakcję dla wielu zapytań
+
+      for (const statement of statements) {
+        const queryUpper = statement.toUpperCase().trim();
+
+        const isDelete = queryUpper.startsWith("DELETE ");
+        const isDropTable = queryUpper.startsWith("DROP TABLE ");
+        const isDropIndex = queryUpper.startsWith("DROP INDEX ");
+        const isDropTrigger = queryUpper.startsWith("DROP TRIGGER ");
+
+        if (!(isDelete || isDropTable || isDropIndex || isDropTrigger)) {
+          await client.query("ROLLBACK"); // Wycofaj transakcję w przypadku niedozwolonego zapytania
+          return {
+            content: [{ type: "text", text: `Only DELETE (with WHERE clause), DROP TABLE, DROP INDEX, or DROP TRIGGER queries are allowed with sql_delete_engine. Disallowed query: ${statement}` }],
+            isError: true,
+          };
+        }
+
+        if (isDelete && !queryUpper.includes("WHERE")) {
+          await client.query("ROLLBACK"); // Wycofaj transakcję
+          return {
+            content: [{ type: "text", text: `DELETE queries must include a WHERE clause for safety. Query: ${statement}` }],
+            isError: true,
+          };
+        }
+
+        await client.query(statement);
+        results.push(`Query executed successfully: ${statement.substring(0, 50)}...`);
+      }
+
+      await client.query("COMMIT"); // Zatwierdź transakcję po wszystkich zapytaniach
+      return {
+        content: [{ type: "text", text: `Destructive queries executed successfully.\n${results.join('\n')}` }],
+        isError: false,
+      };
+    } catch (error: any) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+         console.warn("Could not roll back transaction on error:", rollbackError);
+      }
+      throw new Error(`Error executing sql_delete_engine: ${error.message}`);
+    } finally {
       client.release();
     }
   }
