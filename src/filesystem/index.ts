@@ -299,11 +299,11 @@ const CreateDirectoryArgsSchema = z.object({
 });
 
 const ListDirectoryArgsSchema = z.object({
-  path: z.string().min(1, 'Path cannot be empty'),
+  path: z.string().min(1, 'Path cannot be empty').optional(),
 });
 
 const DirectoryTreeArgsSchema = z.object({
-  path: z.string().min(1, 'Path cannot be empty'),
+  path: z.string().min(1, 'Path cannot be empty').optional(),
 });
 
 const MoveFileArgsSchema = z.object({
@@ -312,7 +312,7 @@ const MoveFileArgsSchema = z.object({
 });
 
 const SearchFilesArgsSchema = z.object({
-  path: z.string().min(1, 'Path cannot be empty'),
+  path: z.string().min(1, 'Path cannot be empty').optional(), // Zmieniono na opcjonalne
   pattern: z.string().min(1, 'Search pattern cannot be empty'),
   excludePatterns: z.array(z.string()).optional().default([]),
   maxResults: z.number().int().positive().optional().describe('Maximum number of results to return (default: unlimited)'),
@@ -371,6 +371,7 @@ async function searchFiles(
   findFirst: boolean = false
 ): Promise<string[]> {
   const results: string[] = [];
+  const queue: string[] = [rootPath]; // Initialize queue for BFS
   
   // Combine local excludes with global excludes
   const allExcludePatterns = [...globalExcludePatterns, ...excludePatterns];
@@ -380,16 +381,18 @@ async function searchFiles(
     maxResults = 1;
   }
 
-  async function search(currentPath: string): Promise<boolean> {
+  while (queue.length > 0) {
+    // Check if we've reached our limit
+    if (maxResults && results.length >= maxResults) {
+      break; // Stop searching
+    }
+
+    const currentPath = queue.shift()!; // Dequeue the current directory
+
     try {
       const entries = await fs.readdir(currentPath, { withFileTypes: true });
 
       for (const entry of entries) {
-        // Check if we've reached our limit
-        if (maxResults && results.length >= maxResults) {
-          return true; // Signal to stop searching
-        }
-        
         const fullPath = path.join(currentPath, entry.name);
 
         try {
@@ -408,25 +411,22 @@ async function searchFiles(
             continue;
           }
 
-          if (entry.name.toLowerCase().includes(pattern.toLowerCase())) {
+          if (entry.name.toLowerCase().includes(pattern.toLowerCase())) { // Usunięto entry.isFile()
             results.push(fullPath);
             
             // If findFirst is true, stop immediately after first match
             if (findFirst) {
-              return true;
+              return results; // Return immediately
             }
             
             // If we've reached maxResults, stop
             if (maxResults && results.length >= maxResults) {
-              return true;
+              return results; // Return immediately
             }
           }
 
           if (entry.isDirectory()) {
-            const shouldStop = await search(fullPath);
-            if (shouldStop) {
-              return true;
-            }
+            queue.push(fullPath); // Enqueue directories for later processing
           }
         } catch (error) {
           // Skip invalid paths during search
@@ -437,11 +437,8 @@ async function searchFiles(
       // Skip directories that can't be read
       console.warn(`Skipping directory ${currentPath}: ${error}`);
     }
-    
-    return false; // Continue searching
   }
 
-  await search(rootPath);
   return results;
 }
 
@@ -716,7 +713,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "list_directory": {
         const parsed = validateAndParseArgs(ListDirectoryArgsSchema, args, 'list_directory');
-        const validPath = await validatePath(parsed.path);
+        const targetPath = parsed.path ?? allowedDirectories[0]; // Użyj pierwszej dozwolonej ścieżki jako domyślnej
+        if (!targetPath) {
+          throw new Error("No allowed directories configured for listing.");
+        }
+        const validPath = await validatePath(targetPath);
         const entries = await fs.readdir(validPath, { withFileTypes: true });
         
         // Filter out excluded patterns
@@ -735,6 +736,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         case "directory_tree": {
             const parsed = validateAndParseArgs(DirectoryTreeArgsSchema, args, 'directory_tree');
+            const targetPath = parsed.path ?? allowedDirectories[0]; // Użyj pierwszej dozwolonej ścieżki jako domyślnej
+            if (!targetPath) {
+              throw new Error("No allowed directories configured for tree view.");
+            }
 
             interface TreeEntry {
                 name: string;
@@ -776,7 +781,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 return result;
             }
 
-            const treeData = await buildTree(parsed.path);
+            const treeData = await buildTree(targetPath);
             return {
                 content: [{
                     type: "text",
@@ -797,7 +802,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "search_files": {
         const parsed = validateAndParseArgs(SearchFilesArgsSchema, args, 'search_files');
-        const validPath = await validatePath(parsed.path);
+        const targetPath = parsed.path ?? allowedDirectories[0]; // Użyj pierwszej dozwolonej ścieżki jako domyślnej
+        if (!targetPath) {
+          throw new Error("No allowed directories configured for searching.");
+        }
+        const validPath = await validatePath(targetPath);
         const results = await searchFiles(
           validPath, 
           parsed.pattern, 
