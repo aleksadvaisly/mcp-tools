@@ -1,5 +1,21 @@
 #!/usr/bin/env node
 
+/*
+ * Enhanced Filesystem MCP Server with Parameter Validation
+ * 
+ * This server now includes comprehensive parameter validation that provides
+ * clear error messages for common mistakes:
+ * 
+ * Examples of validation:
+ * ✅ Correct: { "path": "/some/valid/path" }
+ * ❌ Wrong:   { "file_path": "/some/path" } → Error: Use 'path' instead of 'file_path'
+ * ❌ Wrong:   { "path": "" } → Error: Path cannot be empty
+ * ❌ Wrong:   { "path": null } → Error: Path must be a non-empty string
+ * 
+ * The server catches common parameter naming mistakes and provides
+ * helpful suggestions for the correct parameter names.
+ */
+
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -53,8 +69,66 @@ await Promise.all(args.map(async (dir) => {
   }
 }));
 
+// Parameter validation utilities
+function validateAndParseArgs<T>(schema: z.ZodType<T>, args: any, toolName: string): T {
+  // Check for common parameter name mistakes
+  const commonMistakes = {
+    'file_path': 'path',
+    'filepath': 'path',
+    'filename': 'path',
+    'directory': 'path',
+    'dir': 'path'
+  };
+
+  // Check if user provided wrong parameter names
+  if (args && typeof args === 'object') {
+    for (const [wrongName, correctName] of Object.entries(commonMistakes)) {
+      if (wrongName in args && !(correctName in args)) {
+        throw new Error(
+          `Invalid parameter name for ${toolName}: Use '${correctName}' instead of '${wrongName}'. ` +
+          `Received: ${JSON.stringify(args)}`
+        );
+      }
+    }
+  }
+
+  const parsed = schema.safeParse(args);
+  if (!parsed.success) {
+    const errorDetails = parsed.error.errors.map(err => 
+      `${err.path.join('.')}: ${err.message}`
+    ).join(', ');
+    
+    throw new Error(
+      `Invalid arguments for ${toolName}. Expected parameters: ${getExpectedParams(schema)}. ` +
+      `Errors: ${errorDetails}. Received: ${JSON.stringify(args)}`
+    );
+  }
+
+  return parsed.data;
+}
+
+function getExpectedParams(schema: z.ZodType<any>): string {
+  try {
+    if (schema instanceof z.ZodObject) {
+      return Object.keys(schema.shape).join(', ');
+    }
+  } catch {
+    // Fallback if schema introspection fails
+  }
+  return 'see tool description';
+}
+
 // Security utilities
 async function validatePath(requestedPath: string): Promise<string> {
+  // Additional input validation
+  if (!requestedPath || typeof requestedPath !== 'string') {
+    throw new Error(`Invalid path: Path must be a non-empty string. Received: ${JSON.stringify(requestedPath)}`);
+  }
+  
+  if (requestedPath.trim() === '') {
+    throw new Error('Invalid path: Path cannot be empty or whitespace only');
+  }
+
   const expandedPath = expandHome(requestedPath);
   const absolute = path.isAbsolute(expandedPath)
     ? path.resolve(expandedPath)
@@ -96,15 +170,15 @@ async function validatePath(requestedPath: string): Promise<string> {
 
 // Schema definitions
 const ReadFileArgsSchema = z.object({
-  path: z.string(),
+  path: z.string().min(1, 'Path cannot be empty'),
 });
 
 const ReadMultipleFilesArgsSchema = z.object({
-  paths: z.array(z.string()),
+  paths: z.array(z.string().min(1, 'Path cannot be empty')),
 });
 
 const WriteFileArgsSchema = z.object({
-  path: z.string(),
+  path: z.string().min(1, 'Path cannot be empty'),
   content: z.string(),
 });
 
@@ -114,36 +188,36 @@ const EditOperation = z.object({
 });
 
 const EditFileArgsSchema = z.object({
-  path: z.string(),
+  path: z.string().min(1, 'Path cannot be empty'),
   edits: z.array(EditOperation),
   dryRun: z.boolean().default(false).describe('Preview changes using git-style diff format')
 });
 
 const CreateDirectoryArgsSchema = z.object({
-  path: z.string(),
+  path: z.string().min(1, 'Path cannot be empty'),
 });
 
 const ListDirectoryArgsSchema = z.object({
-  path: z.string(),
+  path: z.string().min(1, 'Path cannot be empty'),
 });
 
 const DirectoryTreeArgsSchema = z.object({
-  path: z.string(),
+  path: z.string().min(1, 'Path cannot be empty'),
 });
 
 const MoveFileArgsSchema = z.object({
-  source: z.string(),
-  destination: z.string(),
+  source: z.string().min(1, 'Source path cannot be empty'),
+  destination: z.string().min(1, 'Destination path cannot be empty'),
 });
 
 const SearchFilesArgsSchema = z.object({
-  path: z.string(),
-  pattern: z.string(),
+  path: z.string().min(1, 'Path cannot be empty'),
+  pattern: z.string().min(1, 'Search pattern cannot be empty'),
   excludePatterns: z.array(z.string()).optional().default([])
 });
 
 const GetFileInfoArgsSchema = z.object({
-  path: z.string(),
+  path: z.string().min(1, 'Path cannot be empty'),
 });
 
 const ToolInputSchema = ToolSchema.shape.inputSchema;
@@ -446,11 +520,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     switch (name) {
       case "read_file": {
-        const parsed = ReadFileArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for read_file: ${parsed.error}`);
-        }
-        const validPath = await validatePath(parsed.data.path);
+        const parsed = validateAndParseArgs(ReadFileArgsSchema, args, 'read_file');
+        const validPath = await validatePath(parsed.path);
         const content = await fs.readFile(validPath, "utf-8");
         return {
           content: [{ type: "text", text: content }],
@@ -458,12 +529,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "read_multiple_files": {
-        const parsed = ReadMultipleFilesArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for read_multiple_files: ${parsed.error}`);
-        }
+        const parsed = validateAndParseArgs(ReadMultipleFilesArgsSchema, args, 'read_multiple_files');
         const results = await Promise.all(
-          parsed.data.paths.map(async (filePath: string) => {
+          parsed.paths.map(async (filePath: string) => {
             try {
               const validPath = await validatePath(filePath);
               const content = await fs.readFile(validPath, "utf-8");
@@ -480,47 +548,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "write_file": {
-        const parsed = WriteFileArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for write_file: ${parsed.error}`);
-        }
-        const validPath = await validatePath(parsed.data.path);
-        await fs.writeFile(validPath, parsed.data.content, "utf-8");
+        const parsed = validateAndParseArgs(WriteFileArgsSchema, args, 'write_file');
+        const validPath = await validatePath(parsed.path);
+        await fs.writeFile(validPath, parsed.content, "utf-8");
         return {
-          content: [{ type: "text", text: `Successfully wrote to ${parsed.data.path}` }],
+          content: [{ type: "text", text: `Successfully wrote to ${parsed.path}` }],
         };
       }
 
       case "edit_file": {
-        const parsed = EditFileArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for edit_file: ${parsed.error}`);
-        }
-        const validPath = await validatePath(parsed.data.path);
-        const result = await applyFileEdits(validPath, parsed.data.edits, parsed.data.dryRun);
+        const parsed = validateAndParseArgs(EditFileArgsSchema, args, 'edit_file');
+        const validPath = await validatePath(parsed.path);
+        const result = await applyFileEdits(validPath, parsed.edits as Array<{oldText: string, newText: string}>, parsed.dryRun);
         return {
           content: [{ type: "text", text: result }],
         };
       }
 
       case "create_directory": {
-        const parsed = CreateDirectoryArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for create_directory: ${parsed.error}`);
-        }
-        const validPath = await validatePath(parsed.data.path);
+        const parsed = validateAndParseArgs(CreateDirectoryArgsSchema, args, 'create_directory');
+        const validPath = await validatePath(parsed.path);
         await fs.mkdir(validPath, { recursive: true });
         return {
-          content: [{ type: "text", text: `Successfully created directory ${parsed.data.path}` }],
+          content: [{ type: "text", text: `Successfully created directory ${parsed.path}` }],
         };
       }
 
       case "list_directory": {
-        const parsed = ListDirectoryArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for list_directory: ${parsed.error}`);
-        }
-        const validPath = await validatePath(parsed.data.path);
+        const parsed = validateAndParseArgs(ListDirectoryArgsSchema, args, 'list_directory');
+        const validPath = await validatePath(parsed.path);
         const entries = await fs.readdir(validPath, { withFileTypes: true });
         const formatted = entries
           .map((entry) => `${entry.isDirectory() ? "[DIR]" : "[FILE]"} ${entry.name}`)
@@ -531,10 +587,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
         case "directory_tree": {
-            const parsed = DirectoryTreeArgsSchema.safeParse(args);
-            if (!parsed.success) {
-                throw new Error(`Invalid arguments for directory_tree: ${parsed.error}`);
-            }
+            const parsed = validateAndParseArgs(DirectoryTreeArgsSchema, args, 'directory_tree');
 
             interface TreeEntry {
                 name: string;
@@ -564,7 +617,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 return result;
             }
 
-            const treeData = await buildTree(parsed.data.path);
+            const treeData = await buildTree(parsed.path);
             return {
                 content: [{
                     type: "text",
@@ -574,36 +627,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
       case "move_file": {
-        const parsed = MoveFileArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for move_file: ${parsed.error}`);
-        }
-        const validSourcePath = await validatePath(parsed.data.source);
-        const validDestPath = await validatePath(parsed.data.destination);
+        const parsed = validateAndParseArgs(MoveFileArgsSchema, args, 'move_file');
+        const validSourcePath = await validatePath(parsed.source);
+        const validDestPath = await validatePath(parsed.destination);
         await fs.rename(validSourcePath, validDestPath);
         return {
-          content: [{ type: "text", text: `Successfully moved ${parsed.data.source} to ${parsed.data.destination}` }],
+          content: [{ type: "text", text: `Successfully moved ${parsed.source} to ${parsed.destination}` }],
         };
       }
 
       case "search_files": {
-        const parsed = SearchFilesArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for search_files: ${parsed.error}`);
-        }
-        const validPath = await validatePath(parsed.data.path);
-        const results = await searchFiles(validPath, parsed.data.pattern, parsed.data.excludePatterns);
+        const parsed = validateAndParseArgs(SearchFilesArgsSchema, args, 'search_files');
+        const validPath = await validatePath(parsed.path);
+        const results = await searchFiles(validPath, parsed.pattern, parsed.excludePatterns);
         return {
           content: [{ type: "text", text: results.length > 0 ? results.join("\n") : "No matches found" }],
         };
       }
 
       case "get_file_info": {
-        const parsed = GetFileInfoArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments for get_file_info: ${parsed.error}`);
-        }
-        const validPath = await validatePath(parsed.data.path);
+        const parsed = validateAndParseArgs(GetFileInfoArgsSchema, args, 'get_file_info');
+        const validPath = await validatePath(parsed.path);
         const info = await getFileStats(validPath);
         return {
           content: [{ type: "text", text: Object.entries(info)
