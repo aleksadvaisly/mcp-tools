@@ -327,10 +327,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: "rls_policies",
-      description: `Get Row Level Security (RLS) policies information from the database. Returns policy details including commands, conditions, and target tables.`,
+      description: `Get Row Level Security (RLS) policies information from the database. Returns policy details including commands, conditions, and target tables. Filter tables using glob patterns.`,
       inputSchema: {
         type: "object",
         properties: {
+          glob_pattern: {
+            type: "string",
+            default: "*",
+            description: "Glob pattern to filter table names (* for all)."
+          },
           format: {
             type: "string",
             enum: ["json", "text", "markdown"],
@@ -749,9 +754,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   
   else if (name === "rls_policies") {
+    const globPattern = args?.glob_pattern as string || "*";
     const format = (args?.format as string || "json").toLowerCase();
     
-    const rlsQuery = `
+    // Konwertuj glob pattern na SQL LIKE pattern
+    let likePattern: string;
+    if (globPattern === "*") {
+      likePattern = "%"; // Wszystkie tabele
+    } else {
+      // Zamień glob wildcards na SQL LIKE wildcards
+      likePattern = globPattern
+        .replace(/\*/g, "%")     // * -> %
+        .replace(/\?/g, "_");     // ? -> _
+    }
+    
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN TRANSACTION READ ONLY");
+      
+      const rlsQuery = `
 SELECT
   p.polname AS policy_name,
   c.relname AS table_name,
@@ -765,8 +786,7 @@ SELECT
   END AS command,
   p.polpermissive AS is_permissive,
   pg_get_expr(p.polqual, c.oid) AS using_clause,
-  pg_get_expr(p.polwithcheck, c.oid) AS with_check_clause,
-  n.nspname AS schema_name
+  pg_get_expr(p.polwithcheck, c.oid) AS with_check_clause
 FROM
   pg_policy p
 JOIN
@@ -775,13 +795,11 @@ JOIN
   pg_namespace n ON c.relnamespace = n.oid
 WHERE
   n.nspname = 'public'
+  AND c.relname LIKE $1
 ORDER BY
-  schema_name, table_name, policy_name`;
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN TRANSACTION READ ONLY");
-      const result = await client.query(rlsQuery);
+  table_name, policy_name`;
+      
+      const result = await client.query(rlsQuery, [likePattern]);
       await client.query("ROLLBACK");
 
       let outputText: string;
@@ -789,12 +807,16 @@ ORDER BY
       if (format === "json") {
         outputText = JSON.stringify(result.rows, null, 2);
       } else if (format === "text") {
-        outputText = result.rows.map(row =>
-          `Policy: ${row.policy_name}\nTable: ${row.table_name}\nCommand: ${row.command}\nPermissive: ${row.is_permissive}\nUsing: ${row.using_clause || 'N/A'}\nWith Check: ${row.with_check_clause || 'N/A'}\n`
-        ).join('\n');
+        if (result.rows.length === 0) {
+          outputText = `No RLS policies found for tables matching pattern: ${globPattern}`;
+        } else {
+          outputText = result.rows.map(row =>
+            `Policy: ${row.policy_name}\nTable: ${row.table_name}\nCommand: ${row.command}\nPermissive: ${row.is_permissive}\nUsing: ${row.using_clause || 'N/A'}\nWith Check: ${row.with_check_clause || 'N/A'}\n`
+          ).join('\n');
+        }
       } else if (format === "markdown") {
         if (result.rows.length === 0) {
-          outputText = "No RLS policies found.";
+          outputText = `No RLS policies found for tables matching pattern: **${globPattern}**`;
         } else {
           const headers = ['policy_name', 'table_name', 'command', 'is_permissive', 'using_clause', 'with_check_clause'];
           const headerLine = `| ${headers.join(" | ")} |`;
@@ -966,6 +988,7 @@ ORDER BY
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // Nie usuwaj poniższego komentarza
   // Don't change below logging from console.error to console.info, otherwise it will brake MCP stdio protocol
   console.error(`MCP server for PostgreSQL (enhanced) is running using database URL from ${urlSource} and connected via stdio.`);
   console.error(`Access tool (GRANT/REVOKE): ${accessFeatureEnabled ? 'ENABLED' : 'DISABLED'} (controlled by MCP_POSTGRES_ACCESS_FEATURE)`);
