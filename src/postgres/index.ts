@@ -482,7 +482,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await client.query("BEGIN");
 
       for (const statement of statements) {
-        const queryUpper = statement.toUpperCase().trim();
+        // Usuń komentarze z początku statement, żeby sprawdzić rzeczywiste słowo kluczowe SQL
+        let cleanedStatement = statement.trim();
+        
+        // Usuń komentarze liniowe z początku
+        while (cleanedStatement.startsWith('--')) {
+          const newlineIndex = cleanedStatement.indexOf('\n');
+          if (newlineIndex === -1) {
+            cleanedStatement = ''; // Cały statement to komentarz
+            break;
+          }
+          cleanedStatement = cleanedStatement.substring(newlineIndex + 1).trim();
+        }
+        
+        // Usuń komentarze blokowe z początku
+        while (cleanedStatement.startsWith('/*')) {
+          const endIndex = cleanedStatement.indexOf('*/');
+          if (endIndex === -1) {
+            cleanedStatement = ''; // Niepoprawny komentarz blokowy
+            break;
+          }
+          cleanedStatement = cleanedStatement.substring(endIndex + 2).trim();
+        }
+        
+        // Jeśli po usunięciu komentarzy nic nie zostało, pomiń ten statement
+        if (!cleanedStatement) {
+          continue;
+        }
+        
+        const queryUpper = cleanedStatement.toUpperCase().trim();
 
         // Prosta walidacja - dozwolone operacje
         const allowedStarts = ['CREATE ', 'ALTER ', 'COMMENT ON '];
