@@ -326,6 +326,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
     },
     {
+      name: "functions",
+      description: `Get database functions information including arguments, return types, language, owner and comments. Filter functions using glob patterns and control system functions visibility.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          filter: {
+            type: "string",
+            default: "*",
+            description: "Glob pattern to filter function names (* for all)."
+          },
+          format: {
+            type: "string",
+            enum: ["json", "text", "markdown"],
+            default: "json",
+            description: "Output format: json (default), text, or markdown."
+          },
+          user: {
+            type: "string",
+            default: "postgres",
+            description: "Glob pattern to filter function owners (* for all, default: postgres - excludes system users like supabase_admin)."
+          },
+        },
+      },
+    },
+    {
       name: "rls_policies",
       description: `Get Row Level Security (RLS) policies information from the database. Returns policy details including commands, conditions, and target tables. Filter tables using glob patterns.`,
       inputSchema: {
@@ -748,6 +773,107 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     } catch (error: any) {
       throw new Error(`Error executing schema: ${error.message}`);
+    } finally {
+      client.release();
+    }
+  }
+  
+  else if (name === "functions") {
+    const globPattern = args?.filter as string || "*";
+    const format = (args?.format as string || "json").toLowerCase();
+    const userPattern = args?.user as string || "postgres";
+    
+    // Konwertuj glob pattern na SQL LIKE pattern
+    let likePattern: string;
+    if (globPattern === "*") {
+      likePattern = "%"; // Wszystkie funkcje
+    } else {
+      // Zamień glob wildcards na SQL LIKE wildcards
+      likePattern = globPattern
+        .replace(/\*/g, "%")     // * -> %
+        .replace(/\?/g, "_");     // ? -> _
+    }
+    
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN TRANSACTION READ ONLY");
+      
+      // Zawsze filtruj po public schema, a filtrowanie właściciela rób w JavaScript
+      const functionsQuery = `
+SELECT
+  p.proname AS function_name,
+  n.nspname AS schema_name,
+  pg_get_function_arguments(p.oid) AS arguments,
+  pg_get_function_result(p.oid) AS return_type,
+  obj_description(p.oid, 'pg_proc') AS comment,
+  l.lanname AS language,
+  a.rolname AS owner_name
+FROM
+  pg_proc p
+JOIN
+  pg_namespace n ON p.pronamespace = n.oid
+JOIN
+  pg_language l ON p.prolang = l.oid
+JOIN
+  pg_authid a ON p.proowner = a.oid
+WHERE
+  n.nspname = 'public'
+  AND p.proname LIKE $1
+ORDER BY
+  schema_name, function_name`;
+      
+      const result = await client.query(functionsQuery, [likePattern]);
+      await client.query("ROLLBACK");
+
+      // Filtruj właścicieli funkcji za pomocą glob pattern
+      const filteredRows = result.rows.filter(row => 
+        micromatch.isMatch(row.owner_name, userPattern)
+      );
+
+      let outputText: string;
+
+      if (format === "json") {
+        outputText = JSON.stringify(filteredRows, null, 2);
+      } else if (format === "text") {
+        if (filteredRows.length === 0) {
+          outputText = `No functions found matching pattern: ${globPattern} and user: ${userPattern}`;
+        } else {
+          outputText = filteredRows.map(row =>
+            `Function: ${row.schema_name}.${row.function_name}\n` +
+            `Arguments: ${row.arguments || 'none'}\n` +
+            `Returns: ${row.return_type}\n` +
+            `Language: ${row.language}\n` +
+            `Owner: ${row.owner_name}\n` +
+            `Comment: ${row.comment || 'N/A'}\n`
+          ).join('\n');
+        }
+      } else if (format === "markdown") {
+        if (filteredRows.length === 0) {
+          outputText = `No functions found matching pattern: **${globPattern}** and user: **${userPattern}**`;
+        } else {
+          const headers = ['function_name', 'schema_name', 'arguments', 'return_type', 'language', 'owner_name', 'comment'];
+          const headerLine = `| ${headers.join(" | ")} |`;
+          const separatorLine = `| ${headers.map(() => "---").join(" | ")} |`;
+          const dataLines = filteredRows.map(row =>
+            `| ${headers.map(header => String(row[header] ?? "N/A")).join(" | ")} |`
+          ).join("\n");
+          outputText = `${headerLine}\n${separatorLine}\n${dataLines}`;
+        }
+      } else {
+        throw new Error(`Unsupported format: ${format}`);
+      }
+
+      return {
+        content: [{ type: "text", text: outputText }],
+        isError: false,
+      };
+    } catch (error: any) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.warn("Could not roll back transaction on error:", rollbackError);
+      }
+      throw new Error(`Error executing functions: ${error.message}`);
     } finally {
       client.release();
     }
