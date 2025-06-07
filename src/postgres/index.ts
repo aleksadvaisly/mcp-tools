@@ -846,8 +846,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.info(`MCP server for PostgreSQL (enhanced) is running using database URL from ${urlSource} and connected via stdio.`);
-  console.info(`Access tool (GRANT/REVOKE): ${accessFeatureEnabled ? 'ENABLED' : 'DISABLED'} (controlled by MCP_POSTGRES_ACCESS_FEATURE)`);
+  // Don't change below logging from console.error to console.info, otherwise it will brake MCP stdio protocol
+  console.error(`MCP server for PostgreSQL (enhanced) is running using database URL from ${urlSource} and connected via stdio.`);
+  console.error(`Access tool (GRANT/REVOKE): ${accessFeatureEnabled ? 'ENABLED' : 'DISABLED'} (controlled by MCP_POSTGRES_ACCESS_FEATURE)`);
 }
 
 runServer().catch(error => {
