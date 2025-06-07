@@ -1,19 +1,24 @@
 #!/usr/bin/env node
 
 /*
- * Enhanced Filesystem MCP Server with Parameter Validation
+ * Enhanced Filesystem MCP Server with Advanced Features
  * 
- * This server now includes comprehensive parameter validation that provides
- * clear error messages for common mistakes:
+ * Features:
+ * 1. Parameter Validation - Clear error messages for common mistakes
+ * 2. Developer-Friendly Excludes - Automatically filters out common dev files/folders
+ * 3. Flexible Include/Exclude System - Support for both legacy and new argument formats
+ * 
+ * Usage:
+ * New format:   node index.ts --include /projects --exclude .env private.txt
+ * Legacy format: node index.ts /projects (with warnings)
  * 
  * Examples of validation:
  * ✅ Correct: { "path": "/some/valid/path" }
  * ❌ Wrong:   { "file_path": "/some/path" } → Error: Use 'path' instead of 'file_path'
  * ❌ Wrong:   { "path": "" } → Error: Path cannot be empty
- * ❌ Wrong:   { "path": null } → Error: Path must be a non-empty string
  * 
- * The server catches common parameter naming mistakes and provides
- * helpful suggestions for the correct parameter names.
+ * Default excludes: .DS_Store, .git, __pycache__, .venv, venv, node_modules, dist, build, etc.
+ * Custom excludes: Add your own patterns with --exclude
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -31,12 +36,90 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { diffLines, createTwoFilesPatch } from 'diff';
 import { minimatch } from 'minimatch';
 
-// Command line argument parsing
-const args = process.argv.slice(2);
-if (args.length === 0) {
-  console.error("Usage: mcp-server-filesystem <allowed-directory> [additional-directories...]");
-  process.exit(1);
+// Command line argument parsing with --include and --exclude support
+interface ParsedArgs {
+  include: string[];
+  exclude: string[];
 }
+
+// Default exclude patterns for developer environments
+const defaultExcludePatterns = [
+  '.DS_Store',
+  '.git',
+  '__pycache__',
+  '.venv',
+  'venv',
+  'node_modules',
+  'dist',
+  'build',
+  '.idea',
+  '.vscode',
+  '*.pyc',
+  '.pytest_cache',
+  '.coverage',
+  'coverage.xml',
+  '.nyc_output',
+  '.cache',
+  '.parcel-cache',
+  'target',
+  'bin'
+];
+
+function parseArguments(args: string[]): ParsedArgs {
+  const result: ParsedArgs = {
+    include: [],
+    exclude: []
+  };
+  
+  if (args.length === 0) {
+    console.error("Usage: mcp-server-filesystem --include <dir1> [dir2...] [--exclude <pattern1> [pattern2...]]");
+    console.error("       mcp-server-filesystem --list-excludes");
+    console.error("Example: mcp-server-filesystem --include /projects --exclude .DS_Store .git __pycache__ .venv venv node_modules dist build");
+    process.exit(1);
+  }
+  
+  // Handle --list-excludes flag
+  if (args.includes('--list-excludes')) {
+    console.log("Default exclude patterns:");
+    defaultExcludePatterns.forEach(pattern => console.log(`  ${pattern}`));
+    process.exit(0);
+  }
+  
+  let currentFlag: 'include' | 'exclude' | null = null;
+  
+  // Handle legacy format (no flags, just directories)
+  if (!args.includes('--include') && !args.includes('--exclude')) {
+    console.warn("Legacy format detected. Please use --include flag. Converting to new format.");
+    result.include = args;
+    return result;
+  }
+  
+  for (const arg of args) {
+    if (arg === '--include') {
+      currentFlag = 'include';
+    } else if (arg === '--exclude') {
+      currentFlag = 'exclude';
+    } else if (currentFlag) {
+      result[currentFlag].push(arg);
+    } else {
+      console.error(`Unexpected argument: ${arg}. Use --include or --exclude flags.`);
+      process.exit(1);
+    }
+  }
+  
+  if (result.include.length === 0) {
+    console.error("At least one --include directory must be specified.");
+    process.exit(1);
+  }
+  
+  return result;
+}
+
+const args = process.argv.slice(2);
+const parsedArgs = parseArguments(args);
+
+// Combine user-specified excludes with defaults
+const globalExcludePatterns = [...defaultExcludePatterns, ...parsedArgs.exclude];
 
 // Normalize all paths consistently
 function normalizePath(p: string): string {
@@ -51,12 +134,12 @@ function expandHome(filepath: string): string {
 }
 
 // Store allowed directories in normalized form
-const allowedDirectories = args.map(dir =>
+const allowedDirectories = parsedArgs.include.map(dir =>
   normalizePath(path.resolve(expandHome(dir)))
 );
 
 // Validate that all directories exist and are accessible
-await Promise.all(args.map(async (dir) => {
+await Promise.all(parsedArgs.include.map(async (dir) => {
   try {
     const stats = await fs.stat(expandHome(dir));
     if (!stats.isDirectory()) {
@@ -116,6 +199,24 @@ function getExpectedParams(schema: z.ZodType<any>): string {
     // Fallback if schema introspection fails
   }
   return 'see tool description';
+}
+
+// Helper function to check if path should be excluded
+function shouldExcludePath(filePath: string, basePath: string = ''): boolean {
+  // Get relative path for pattern matching
+  const relativePath = basePath ? path.relative(basePath, filePath) : path.basename(filePath);
+  
+  return globalExcludePatterns.some(pattern => {
+    // Direct name match
+    if (relativePath === pattern || path.basename(filePath) === pattern) {
+      return true;
+    }
+    
+    // Glob pattern match
+    const globPattern = pattern.includes('*') ? pattern : `**/${pattern}/**`;
+    return minimatch(relativePath, globPattern, { dot: true }) ||
+           minimatch(path.basename(filePath), pattern, { dot: true });
+  });
 }
 
 // Security utilities
@@ -213,7 +314,9 @@ const MoveFileArgsSchema = z.object({
 const SearchFilesArgsSchema = z.object({
   path: z.string().min(1, 'Path cannot be empty'),
   pattern: z.string().min(1, 'Search pattern cannot be empty'),
-  excludePatterns: z.array(z.string()).optional().default([])
+  excludePatterns: z.array(z.string()).optional().default([]),
+  maxResults: z.number().int().positive().optional().describe('Maximum number of results to return (default: unlimited)'),
+  findFirst: z.boolean().optional().default(false).describe('Stop after finding the first match (fastest option)')
 });
 
 const GetFileInfoArgsSchema = z.object({
@@ -263,43 +366,79 @@ async function getFileStats(filePath: string): Promise<FileInfo> {
 async function searchFiles(
   rootPath: string,
   pattern: string,
-  excludePatterns: string[] = []
+  excludePatterns: string[] = [],
+  maxResults?: number,
+  findFirst: boolean = false
 ): Promise<string[]> {
   const results: string[] = [];
+  
+  // Combine local excludes with global excludes
+  const allExcludePatterns = [...globalExcludePatterns, ...excludePatterns];
+  
+  // Early exit conditions
+  if (findFirst && maxResults === undefined) {
+    maxResults = 1;
+  }
 
-  async function search(currentPath: string) {
-    const entries = await fs.readdir(currentPath, { withFileTypes: true });
+  async function search(currentPath: string): Promise<boolean> {
+    try {
+      const entries = await fs.readdir(currentPath, { withFileTypes: true });
 
-    for (const entry of entries) {
-      const fullPath = path.join(currentPath, entry.name);
+      for (const entry of entries) {
+        // Check if we've reached our limit
+        if (maxResults && results.length >= maxResults) {
+          return true; // Signal to stop searching
+        }
+        
+        const fullPath = path.join(currentPath, entry.name);
 
-      try {
-        // Validate each path before processing
-        await validatePath(fullPath);
+        try {
+          // Validate each path before processing
+          await validatePath(fullPath);
 
-        // Check if path matches any exclude pattern
-        const relativePath = path.relative(rootPath, fullPath);
-        const shouldExclude = excludePatterns.some(pattern => {
-          const globPattern = pattern.includes('*') ? pattern : `**/${pattern}/**`;
-          return minimatch(relativePath, globPattern, { dot: true });
-        });
+          // Check if path matches any exclude pattern (global + local)
+          const relativePath = path.relative(rootPath, fullPath);
+          const shouldExclude = allExcludePatterns.some(excludePattern => {
+            const globPattern = excludePattern.includes('*') ? excludePattern : `**/${excludePattern}/**`;
+            return minimatch(relativePath, globPattern, { dot: true }) ||
+                   minimatch(path.basename(fullPath), excludePattern, { dot: true });
+          });
 
-        if (shouldExclude) {
+          if (shouldExclude) {
+            continue;
+          }
+
+          if (entry.name.toLowerCase().includes(pattern.toLowerCase())) {
+            results.push(fullPath);
+            
+            // If findFirst is true, stop immediately after first match
+            if (findFirst) {
+              return true;
+            }
+            
+            // If we've reached maxResults, stop
+            if (maxResults && results.length >= maxResults) {
+              return true;
+            }
+          }
+
+          if (entry.isDirectory()) {
+            const shouldStop = await search(fullPath);
+            if (shouldStop) {
+              return true;
+            }
+          }
+        } catch (error) {
+          // Skip invalid paths during search
           continue;
         }
-
-        if (entry.name.toLowerCase().includes(pattern.toLowerCase())) {
-          results.push(fullPath);
-        }
-
-        if (entry.isDirectory()) {
-          await search(fullPath);
-        }
-      } catch (error) {
-        // Skip invalid paths during search
-        continue;
       }
+    } catch (error) {
+      // Skip directories that can't be read
+      console.warn(`Skipping directory ${currentPath}: ${error}`);
     }
+    
+    return false; // Continue searching
   }
 
   await search(rootPath);
@@ -486,7 +625,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           "Searches through all subdirectories from the starting path. The search " +
           "is case-insensitive and matches partial names. Returns full paths to all " +
           "matching items. Great for finding files when you don't know their exact location. " +
-          "Only searches within allowed directories.",
+          "Only searches within allowed directories. " +
+          "Options: Use 'findFirst: true' for quick existence checks, or 'maxResults' to limit output.",
         inputSchema: zodToJsonSchema(SearchFilesArgsSchema) as ToolInput,
       },
       {
@@ -578,7 +718,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const parsed = validateAndParseArgs(ListDirectoryArgsSchema, args, 'list_directory');
         const validPath = await validatePath(parsed.path);
         const entries = await fs.readdir(validPath, { withFileTypes: true });
-        const formatted = entries
+        
+        // Filter out excluded patterns
+        const filteredEntries = entries.filter(entry => {
+          const fullPath = path.join(validPath, entry.name);
+          return !shouldExcludePath(fullPath, validPath);
+        });
+        
+        const formatted = filteredEntries
           .map((entry) => `${entry.isDirectory() ? "[DIR]" : "[FILE]"} ${entry.name}`)
           .join("\n");
         return {
@@ -601,14 +748,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const result: TreeEntry[] = [];
 
                 for (const entry of entries) {
+                    const fullPath = path.join(currentPath, entry.name);
+                    
+                    // Skip excluded patterns
+                    if (shouldExcludePath(fullPath, validPath)) {
+                        continue;
+                    }
+                    
                     const entryData: TreeEntry = {
                         name: entry.name,
                         type: entry.isDirectory() ? 'directory' : 'file'
                     };
 
                     if (entry.isDirectory()) {
-                        const subPath = path.join(currentPath, entry.name);
-                        entryData.children = await buildTree(subPath);
+                        try {
+                            entryData.children = await buildTree(fullPath);
+                        } catch (error) {
+                            // Skip directories that can't be read
+                            console.warn(`Skipping directory ${fullPath}: ${error}`);
+                            continue;
+                        }
                     }
 
                     result.push(entryData);
@@ -639,9 +798,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "search_files": {
         const parsed = validateAndParseArgs(SearchFilesArgsSchema, args, 'search_files');
         const validPath = await validatePath(parsed.path);
-        const results = await searchFiles(validPath, parsed.pattern, parsed.excludePatterns);
+        const results = await searchFiles(
+          validPath, 
+          parsed.pattern, 
+          parsed.excludePatterns, 
+          parsed.maxResults, 
+          parsed.findFirst
+        );
+        
+        const responseText = results.length > 0 
+          ? results.join("\n") + (parsed.maxResults && results.length >= parsed.maxResults ? `\n\n(Limited to ${parsed.maxResults} results)` : '')
+          : "No matches found";
+          
         return {
-          content: [{ type: "text", text: results.length > 0 ? results.join("\n") : "No matches found" }],
+          content: [{ type: "text", text: responseText }],
         };
       }
 
@@ -657,10 +827,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "list_allowed_directories": {
+        const excludeInfo = globalExcludePatterns.length > 0 
+          ? `\n\nGlobal exclude patterns (${globalExcludePatterns.length} total):\n${globalExcludePatterns.slice(0, 20).join('\n')}${globalExcludePatterns.length > 20 ? '\n... and more' : ''}` 
+          : '';
         return {
           content: [{
             type: "text",
-            text: `Allowed directories:\n${allowedDirectories.join('\n')}`
+            text: `Allowed directories:\n${allowedDirectories.join('\n')}${excludeInfo}`
           }],
         };
       }
@@ -681,8 +854,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Secure MCP Filesystem Server running on stdio");
+  console.error("Enhanced MCP Filesystem Server running on stdio");
   console.error("Allowed directories:", allowedDirectories);
+  console.error("Global exclude patterns:", globalExcludePatterns.slice(0, 10).join(', ') + (globalExcludePatterns.length > 10 ? ` and ${globalExcludePatterns.length - 10} more...` : ''));
 }
 
 runServer().catch((error) => {
