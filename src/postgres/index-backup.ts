@@ -30,13 +30,10 @@ const server = new Server(
   },
 );
 
-// --- Pobieranie URL bazy danych i konfiguracji ---
+// --- Pobieranie URL bazy danych ---
 const args = process.argv.slice(2);
 let databaseUrl: string | undefined;
-let urlSource: string = "unknown";
-
-// Kontrola dostępności narzędzia access przez zmienną środowiskową
-const accessFeatureEnabled = process.env.MCP_POSTGRES_ACCESS_FEATURE?.toLowerCase() === 'true';
+let urlSource: string = "unknown"; // Zmienna do przechowywania informacji o źródle URL
 
 if (args[0]) {
   databaseUrl = args[0];
@@ -148,12 +145,6 @@ const splitSqlStatements = (fullSql: string): string[] => {
   return statements;
 };
 
-// Funkcja walidacji answer (bez ujawniania poprawnych wartości)
-const validateAnswer = (answer: string): boolean => {
-  const allowedAnswers = ["true", "tak", "1", "ok", "proceed", "go", "yes", "apply"];
-  return allowedAnswers.includes(answer.toLowerCase());
-};
-
 // --- Obsługa zasobów (istniejąca logika) ---
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   const client = await pool.connect();
@@ -207,110 +198,110 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 // --- Definicje narzędzi ---
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  const baseTools = [
-    {
-      name: "select",
-      description: `Perform parameterized SQL SELECT queries. Use placeholders like $1, $2 in your query and provide values array. Supports vector similarity functions for embedding columns.`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "The SELECT query with placeholders (e.g., $1, $2)."
-          },
-          values: {
-            type: "array",
-            items: {},
-            default: [],
-            description: "Array of values for placeholders. Order matters."
-          },
-          format: {
-            type: "string",
-            enum: ["json", "text", "markdown"],
-            default: "json",
-            description: "Output format: json (default), text, or markdown."
-          },
-        },
-        required: ["query"],
-      },
-    },
-    {
-      name: "update",
-      description: `Perform parameterized INSERT and UPDATE queries. Use placeholders and values array for safe parameter binding.`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "The INSERT or UPDATE query with placeholders."
-          },
-          values: {
-            type: "array",
-            items: {},
-            default: [],
-            description: "Array of values for placeholders."
-          },
-        },
-        required: ["query"],
-      },
-    },
-    {
-      name: "create",
-      description: `Perform schema creation and modification: CREATE (tables, indexes, views, functions, triggers), ALTER, COMMENT ON. Supports multiple statements separated by semicolons.`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "DDL query for creating/altering schema objects. Multiple statements allowed with semicolons." },
-        },
-        required: ["query"],
-      },
-    },
-    {
-      name: "schema",
-      description: `Get comprehensive database schema information: tables, columns, indexes, triggers, foreign keys, primary keys. Filter tables using glob patterns.`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          glob_pattern: {
-            type: "string",
-            default: "*",
-            description: "Glob pattern to filter table names (* for all)."
-          },
-        },
-      },
-    },
-    {
-      name: "delete",
-      description: `Perform destructive operations: DELETE (with WHERE), DROP, TRUNCATE. Requires confirmation. Supports multiple statements.`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Destructive SQL query. Multiple statements allowed with semicolons." },
-          answer: { type: "string", description: "Confirmation required for destructive operations." }
-        },
-        required: ["query", "answer"],
-      },
-    },
-  ];
-
-  // Warunkowo dodaj narzędzie access tylko gdy włączone przez zmienną środowiskową
-  if (accessFeatureEnabled) {
-    baseTools.push({
-      name: "access",
-      description: `Manage database permissions: GRANT and REVOKE statements. Requires confirmation for security. Supports multiple statements.`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "GRANT or REVOKE statements. Multiple statements allowed with semicolons." },
-          answer: { type: "string", description: "Confirmation required for permission changes." }
-        },
-        required: ["query", "answer"],
-      },
-    });
-  }
-
   return {
-    tools: baseTools,
+    tools: [
+      {
+        name: "sql_select_engine",
+        description: `Allows you to perform parameterized SQL SELECT queries on the table.
+Use placeholders like $1, $2 in your 'query_template' and provide corresponding values in the 'query_values' array.
+This ensures proper handling of special characters in values and prevents SQL injection.
+Note that in case of columns of type VECTOR, you can query them with embedding similarity functions.
+Example arguments for querying with an embedding similarity function:
+{
+  "query_template": "SELECT profile FROM clients ORDER BY profile_embedding <=> embedding_bge($1) LIMIT $2;",
+  "query_values": ["Tall person with glasses", 100]
+}`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            query_template: {
+              type: "string",
+              description: "The SELECT query template with placeholders (e.g., $1, $2). This should be correct SQL against a table which exists in the database."
+            },
+            query_values: {
+              type: "array",
+              items: {}, // Pozwala na dowolne typy w tablicy
+              default: [],
+              description: "An array of values corresponding to the placeholders in the query_template. Order matters. Example: [$1_value, $2_value, ...]"
+            },
+            format: {
+              type: "string",
+              enum: ["json", "text", "markdown"],
+              default: "json",
+              description: "The format of the result. Possible values are \"text\", \"markdown\" and \"json\" (default)."
+            },
+          },
+          required: ["query_template"],
+        },
+      },
+      {
+        name: "sql_update_engine",
+        description: `Allows you to perform parameterized SQL UPDATE or INSERT queries on the table.
+Use placeholders like $1, $2 in your 'query_template' and provide corresponding values in the 'query_values' array.
+This ensures proper handling of special characters in values and prevents SQL injection.
+INSERT queries can use the WITH clause in the 'query_template'.
+DELETE or DDL (ALTER, CREATE, DROP) queries are NOT allowed with this tool.
+Example arguments for an INSERT statement:
+{
+  "query_template": "INSERT INTO articles (sender, text_column) VALUES ($1, $2);",
+  "query_values": ["user123", "Some text with 'quotes' and other special characters."]
+}`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            query_template: {
+              type: "string",
+              description: "The UPDATE or INSERT query template with placeholders (e.g., $1, $2). This should be correct SQL against a table which exists in the database."
+            },
+            query_values: {
+              type: "array",
+              items: {}, // Pozwala na dowolne typy w tablicy
+              default: [],
+              description: "An array of values corresponding to the placeholders in the query_template. Order matters."
+            },
+          },
+          required: ["query_template"],
+        },
+      },
+      {
+        name: "sql_dml_engine",
+        description: `Allows you to perform schema modification queries: ALTER TABLE, CREATE TABLE, CREATE INDEX, COMMENT ON. Use with caution. Full DROP or DELETE statements are generally NOT allowed with this tool. This tool accepts a full SQL query string, which can contain multiple statements separated by semicolons.`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The DDL query (ALTER, CREATE TABLE/INDEX, COMMENT ON) to perform for schema modification. Can contain multiple statements separated by semicolons." },
+          },
+          required: ["query"],
+        },
+      },
+      {
+        name: "sql_schema_info_engine",
+        description: `Retrieves comprehensive schema information including tables (name, comment), columns (name, type, comment), indexes, triggers, and foreign keys (including ON DELETE CASCADE rules) from the database. Tables are filtered according to the glob expression (e.g. "*" – everything, "?" – a single character, or a specific table name).`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            glob_pattern: {
+              type: "string",
+              default: "*",
+              description: "The glob expression used to filter table names."
+            },
+          },
+        },
+      },
+      {
+        name: "sql_delete_engine",
+        description: `Allows you to perform destructive SQL queries: DELETE (with WHERE clause), DROP TABLE, DROP INDEX, DROP TRIGGER. This tool accepts a full SQL query string, which can contain multiple statements separated by semicolons.
+A confirmation from the user is required via the 'answer' parameter. The operation will only proceed if 'answer' contains one of the following keywords (case-insensitive): true, tak, 1, ok, proceed, go, yes, apply. Otherwise, an error will be thrown.`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The destructive SQL query (DELETE, DROP TABLE, DROP INDEX, DROP TRIGGER). Can contain multiple statements separated by semicolons." },
+            answer: { type: "string", description: "User magic answer needed to proceed with destructive operation. Prompt for this value first." }
+          },
+          required: ["query", "answer"],
+        },
+      },
+    ],
   };
 });
 
@@ -318,24 +309,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  if (name === "select") {
-    const query = args?.query as string;
-    const values = (args?.values as any[]) || [];
+  if (name === "sql_select_engine") {
+    const query_template = args?.query_template as string;
+    const query_values = (args?.query_values as any[]) || [];
     const format = (args?.format as string || "json").toLowerCase();
 
-    if (!query) {
-      throw new Error("Missing 'query' argument for select");
+    if (!query_template) {
+      throw new Error("Missing 'query_template' argument for sql_select_engine");
     }
 
     const client = await pool.connect();
     try {
       await client.query("BEGIN TRANSACTION READ ONLY");
-      const result = await client.query(query, values);
+      const result = await client.query(query_template, query_values);
       await client.query("ROLLBACK");
 
       let outputText: string;
 
       if (format === "json") {
+        // Zwracamy tablicę obiektów, co jest bardziej standardowe dla JSON
         outputText = JSON.stringify(result.rows, null, 2);
       } else if (format === "text") {
         outputText = result.rows.map(row =>
@@ -367,34 +359,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (rollbackError) {
         console.warn("Could not roll back transaction on error:", rollbackError);
       }
-      throw new Error(`Error executing select: ${error.message}`);
+      throw new Error(`Error executing sql_select_engine: ${error.message}`);
     } finally {
       client.release();
     }
-  } 
-  
-  else if (name === "update") {
-    const query = args?.query as string;
-    const values = (args?.values as any[]) || [];
+  } else if (name === "sql_update_engine") {
+    const query_template = args?.query_template as string;
+    const query_values = (args?.query_values as any[]) || [];
 
-    if (!query) {
-      throw new Error("Missing 'query' argument for update");
+    if (!query_template) {
+      throw new Error("Missing 'query_template' argument for sql_update_engine");
     }
 
-    const queryNormalized = query.trim().toLowerCase();
-    const isUpdate = queryNormalized.includes("update ");
-    const isInsert = queryNormalized.includes("insert into ");
-    const startsWithWith = queryNormalized.startsWith("with ");
+    const sqlTemplateNormalized = query_template.trim().toLowerCase();
+
+    const isUpdate = sqlTemplateNormalized.includes("update ");
+    const isInsert = sqlTemplateNormalized.includes("insert into ");
+    const startsWithWith = sqlTemplateNormalized.startsWith("with ");
 
     if (!startsWithWith && !isUpdate && !isInsert) {
-      return {
-        content: [{ type: "text", text: "Only UPDATE or INSERT queries (optionally starting with WITH) are allowed with update tool." }],
-        isError: true,
-      };
+         return {
+            content: [{ type: "text", text: "Only UPDATE or INSERT query templates (optionally starting with WITH) are allowed with sql_update_engine." }],
+            isError: true,
+         };
     }
     if (startsWithWith && !(isUpdate || isInsert)) {
+        return {
+            content: [{ type: "text", text: "WITH clause must be followed by an UPDATE or INSERT statement in the query_template for sql_update_engine." }],
+            isError: true,
+         };
+    }
+
+    const disallowedKeywords = ["delete", "alter", "create", "drop"];
+    if (disallowedKeywords.some(keyword => sqlTemplateNormalized.startsWith(`${keyword} `))) {
       return {
-        content: [{ type: "text", text: "WITH clause must be followed by an UPDATE or INSERT statement." }],
+        content: [{ type: "text", text: `Disallowed keyword found in sql_update_engine query_template. Blocked keywords: ${disallowedKeywords.join(", ")}` }],
         isError: true,
       };
     }
@@ -402,7 +401,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const result = await client.query(query, values);
+      const result = await client.query(query_template, query_values);
       await client.query("COMMIT");
       return {
         content: [{ type: "text", text: `Query executed successfully. Rows affected: ${String(result.rowCount ?? 0)}` }],
@@ -412,65 +411,77 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         await client.query("ROLLBACK");
       } catch (rollbackError) {
-        console.warn("Could not roll back transaction on error:", rollbackError);
+         console.warn("Could not roll back transaction on error:", rollbackError);
       }
-      throw new Error(`Error executing update: ${error.message}`);
+      throw new Error(`Error executing sql_update_engine: ${error.message}`);
     } finally {
       client.release();
     }
-  }
-  
-  else if (name === "create") {
-    const query = args?.query as string;
+  } else if (name === "sql_dml_engine") {
+    const sql = args?.query as string;
 
-    if (!query) {
-      throw new Error("Missing 'query' argument for create");
+    if (!sql) {
+      throw new Error("Missing 'query' argument for sql_dml_engine");
     }
 
-    const statements = splitSqlStatements(query);
+    const statements = splitSqlStatements(sql);
     const results: string[] = [];
 
     const client = await pool.connect();
     try {
-      await client.query("BEGIN");
+      await client.query("BEGIN"); // Rozpocznij transakcję dla wielu zapytań
 
       for (const statement of statements) {
         const queryUpper = statement.toUpperCase().trim();
 
-        // Prosta walidacja - dozwolone operacje
-        const allowedStarts = ['CREATE ', 'ALTER ', 'COMMENT ON '];
-        const isAllowed = allowedStarts.some(prefix => queryUpper.startsWith(prefix));
+        const isAlter = queryUpper.startsWith("ALTER ");
+        const isCreateTable = queryUpper.startsWith("CREATE TABLE ");
+        const isCreateIndex = queryUpper.startsWith("CREATE INDEX ") || queryUpper.startsWith("CREATE UNIQUE INDEX ");
+        const isCommentOn = queryUpper.startsWith("COMMENT ON ");
 
-        if (!isAllowed) {
-          await client.query("ROLLBACK");
+        if (!(isAlter || isCreateTable || isCreateIndex || isCommentOn)) {
+          await client.query("ROLLBACK"); // Wycofaj transakcję w przypadku niedozwolonego zapytania
           return {
-            content: [{ type: "text", text: `Only CREATE, ALTER, or COMMENT ON queries are allowed with create tool. Disallowed query: ${statement}` }],
+            content: [{ type: "text", text: `Only ALTER, CREATE TABLE, CREATE INDEX, or COMMENT ON queries are allowed with sql_dml_engine. Disallowed query: ${statement}` }],
             isError: true,
           };
+        }
+
+        if (isAlter) {
+            if (queryUpper.includes("DROP") &&
+                !queryUpper.match(/ALTER\s+TABLE\s+\S+\s+DROP\s+COLUMN/i) &&
+                !queryUpper.match(/ALTER\s+TABLE\s+\S+\s+DROP\s+CONSTRAINT/i) &&
+                !queryUpper.match(/ALTER\s+TYPE\s+\S+\s+DROP\s+ATTRIBUTE/i)
+            ) {
+               await client.query("ROLLBACK"); // Wycofaj transakcję
+               return {
+                 content: [{ type: "text", text: `Disallowed DROP keyword found within ALTER statement. Only specific subcommands like DROP COLUMN/CONSTRAINT are permitted. Query: ${statement}` }],
+                 isError: true,
+               };
+            }
         }
 
         await client.query(statement);
         results.push(`Query executed successfully: ${statement.substring(0, 50)}...`);
       }
 
-      await client.query("COMMIT");
+      await client.query("COMMIT"); // Zatwierdź transakcję po wszystkich zapytaniach
       return {
-        content: [{ type: "text", text: `Schema creation/modification queries executed successfully.\n${results.join('\n')}` }],
+        content: [{ type: "text", text: `Schema modification queries executed successfully.\n${results.join('\n')}` }],
         isError: false,
       };
     } catch (error: any) {
       try {
         await client.query("ROLLBACK");
       } catch (rollbackError) {
-        console.warn("Could not roll back transaction on error:", rollbackError);
+         console.warn("Could not roll back transaction on error:", rollbackError);
       }
-      throw new Error(`Error executing create: ${error.message}`);
+      throw new Error(`Error executing sql_dml_engine: ${error.message}`);
     } finally {
       client.release();
     }
   }
-  
-  else if (name === "schema") {
+  else if (name === "sql_schema_info_engine") {
     const globPattern = args?.glob_pattern as string || "*";
     const client = await pool.connect();
 
@@ -503,7 +514,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                cols.numeric_scale,
                cols.is_nullable,
                cols.column_default,
-               cols.udt_name,
+               cols.udt_name, -- Dodano udt_name
                pg_catalog.col_description(cls.oid, cols.ordinal_position) AS column_comment
            FROM information_schema.columns AS cols
            JOIN pg_catalog.pg_class AS cls ON cls.relname = cols.table_name AND cls.relnamespace = (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = 'public')
@@ -518,7 +529,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             column_name: col.column_name,
             column_type: col.data_type,
             column_comment: col.column_comment ?? "",
-            is_nullable: col.is_nullable === 'YES',
+            is_nullable: col.is_nullable === 'YES', // Konwersja na boolean
             udt_name: col.udt_name,
           };
 
@@ -533,6 +544,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           if (col.column_default !== null) {
             columnInfo.column_default = col.column_default;
+          }
+          // Dodaj vector_dimensions tylko jeśli nie jest null
+          if (col.vector_dimensions !== null) {
+            columnInfo.vector_dimensions = col.vector_dimensions;
           }
 
           return columnInfo;
@@ -549,7 +564,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               [tableName, col.column_name]
             );
             if (vectorDimensionsResult.rows.length > 0) {
+              // atttypmod dla vectora przechowuje wymiary + 4 (dla typu vector)
+              // np. vector(1536) -> atttypmod = 1536 + 4 = 1540
               const atttypmod = vectorDimensionsResult.rows[0].atttypmod;
+              // Użytkownik wymaga, aby zwracać surową wartość atttypmod jako rozmiar vectora
               col.vector_dimensions = atttypmod;
             }
           }
@@ -562,7 +580,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           indexes: [] as any[],
           triggers: [] as any[],
           foreign_keys: [] as any[],
-          primary_keys: [] as any[],
+          primary_keys: [] as any[], // Dodano placeholder dla kluczy głównych
         });
 
         // Pobieranie informacji o indeksach
@@ -579,6 +597,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           index_definition: idx.index_definition
         }));
         tablesInfo[tablesInfo.length - 1].indexes = currentTableIndexes;
+        console.log(`Indexes for ${tableName}:`, currentTableIndexes);
+
 
         // Pobieranie informacji o triggerach
         const triggersResult = await client.query(
@@ -596,6 +616,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           trigger_definition: trg.trigger_definition
         }));
         tablesInfo[tablesInfo.length - 1].triggers = currentTableTriggers;
+        console.log(`Triggers for ${tableName}:`, currentTableTriggers);
+
 
         // Pobieranie informacji o kluczach obcych
         const foreignKeysResult = await client.query(
@@ -628,6 +650,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           on_delete_rule: fk.on_delete_rule
         }));
         tablesInfo[tablesInfo.length - 1].foreign_keys = currentTableForeignKeys;
+        console.log(`Foreign Keys for ${tableName}:`, currentTableForeignKeys);
 
         // Pobieranie informacji o kluczach głównych
         const primaryKeysResult = await client.query(
@@ -645,62 +668,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         );
         const currentTablePrimaryKeys = primaryKeysResult.rows.map(pk => pk.column_name);
         tablesInfo[tablesInfo.length - 1].primary_keys = currentTablePrimaryKeys;
+        console.log(`Primary Keys for ${tableName}:`, currentTablePrimaryKeys);
+
       }
+      console.log("Final tablesInfo before JSON.stringify:", tablesInfo);
 
       return {
         content: [{ type: "text", text: JSON.stringify({ tables: tablesInfo.length > 0 ? tablesInfo : {} }, null, 2) }],
         isError: false,
       };
     } catch (error: any) {
-      throw new Error(`Error executing schema: ${error.message}`);
-    } finally {
+        throw new Error(`Error executing sql_schema_info_engine: ${error.message}`);
+    }
+    finally {
       client.release();
     }
-  }
-  
-  else if (name === "delete") {
-    const query = args?.query as string;
+  } else if (name === "sql_delete_engine") {
+    const sql = args?.query as string;
     const answer = args?.answer as string;
 
-    if (!query) {
-      throw new Error("Missing 'query' argument for delete");
+    if (!sql) {
+      throw new Error("Missing 'query' argument for sql_delete_engine");
     }
     if (!answer) {
-      throw new Error("Missing 'answer' argument for delete. Confirmation is required for destructive operations.");
+      throw new Error("Missing 'answer' argument for sql_delete_engine. Confirmation is required for destructive operations.");
     }
 
-    if (!validateAnswer(answer)) {
+    const allowedAnswers = ["true", "tak", "1", "ok", "proceed", "go", "yes", "apply"];
+    if (!allowedAnswers.includes(answer.toLowerCase())) {
       return {
-        content: [{ type: "text", text: "Confirmation failed. Destructive operation denied." }],
+        content: [{ type: "text", text: `Confirmation failed. To proceed with destructive operation, 'answer' must be one of: ${allowedAnswers.join(", ")}` }],
         isError: true,
       };
     }
 
-    const statements = splitSqlStatements(query);
+    const statements = splitSqlStatements(sql);
     const results: string[] = [];
 
     const client = await pool.connect();
     try {
-      await client.query("BEGIN");
+      await client.query("BEGIN"); // Rozpocznij transakcję dla wielu zapytań
 
       for (const statement of statements) {
         const queryUpper = statement.toUpperCase().trim();
 
-        // Prosta walidacja - dozwolone operacje
-        const allowedStarts = ['DELETE ', 'DROP ', 'TRUNCATE '];
-        const isAllowed = allowedStarts.some(prefix => queryUpper.startsWith(prefix));
+        const isDelete = queryUpper.startsWith("DELETE ");
+        const isDropTable = queryUpper.startsWith("DROP TABLE ");
+        const isDropIndex = queryUpper.startsWith("DROP INDEX ");
+        const isDropTrigger = queryUpper.startsWith("DROP TRIGGER ");
 
-        if (!isAllowed) {
-          await client.query("ROLLBACK");
+        if (!(isDelete || isDropTable || isDropIndex || isDropTrigger)) {
+          await client.query("ROLLBACK"); // Wycofaj transakcję w przypadku niedozwolonego zapytania
           return {
-            content: [{ type: "text", text: `Only DELETE, DROP, or TRUNCATE queries are allowed with delete tool. Disallowed query: ${statement}` }],
+            content: [{ type: "text", text: `Only DELETE (with WHERE clause), DROP TABLE, DROP INDEX, or DROP TRIGGER queries are allowed with sql_delete_engine. Disallowed query: ${statement}` }],
             isError: true,
           };
         }
 
-        // DELETE musi mieć WHERE
-        if (queryUpper.startsWith("DELETE ") && !queryUpper.includes("WHERE")) {
-          await client.query("ROLLBACK");
+        if (isDelete && !queryUpper.includes("WHERE")) {
+          await client.query("ROLLBACK"); // Wycofaj transakcję
           return {
             content: [{ type: "text", text: `DELETE queries must include a WHERE clause for safety. Query: ${statement}` }],
             isError: true,
@@ -711,7 +737,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         results.push(`Query executed successfully: ${statement.substring(0, 50)}...`);
       }
 
-      await client.query("COMMIT");
+      await client.query("COMMIT"); // Zatwierdź transakcję po wszystkich zapytaniach
       return {
         content: [{ type: "text", text: `Destructive queries executed successfully.\n${results.join('\n')}` }],
         isError: false,
@@ -720,75 +746,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         await client.query("ROLLBACK");
       } catch (rollbackError) {
-        console.warn("Could not roll back transaction on error:", rollbackError);
+         console.warn("Could not roll back transaction on error:", rollbackError);
       }
-      throw new Error(`Error executing delete: ${error.message}`);
-    } finally {
-      client.release();
-    }
-  }
-  
-  else if (name === "access") {
-    // Dodatkowa walidacja - sprawdź czy narzędzie access jest włączone
-    if (!accessFeatureEnabled) {
-      throw new Error("Access tool is disabled. Set MCP_POSTGRES_ACCESS_FEATURE=true to enable.");
-    }
-
-    const query = args?.query as string;
-    const answer = args?.answer as string;
-
-    if (!query) {
-      throw new Error("Missing 'query' argument for access");
-    }
-    if (!answer) {
-      throw new Error("Missing 'answer' argument for access. Confirmation is required for permission changes.");
-    }
-
-    if (!validateAnswer(answer)) {
-      return {
-        content: [{ type: "text", text: "Confirmation failed. Permission change denied." }],
-        isError: true,
-      };
-    }
-
-    const statements = splitSqlStatements(query);
-    const results: string[] = [];
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-
-      for (const statement of statements) {
-        const queryUpper = statement.toUpperCase().trim();
-
-        // Prosta walidacja - dozwolone operacje
-        const allowedStarts = ['GRANT ', 'REVOKE '];
-        const isAllowed = allowedStarts.some(prefix => queryUpper.startsWith(prefix));
-
-        if (!isAllowed) {
-          await client.query("ROLLBACK");
-          return {
-            content: [{ type: "text", text: `Only GRANT or REVOKE queries are allowed with access tool. Disallowed query: ${statement}` }],
-            isError: true,
-          };
-        }
-
-        await client.query(statement);
-        results.push(`Query executed successfully: ${statement.substring(0, 50)}...`);
-      }
-
-      await client.query("COMMIT");
-      return {
-        content: [{ type: "text", text: `Permission queries executed successfully.\n${results.join('\n')}` }],
-        isError: false,
-      };
-    } catch (error: any) {
-      try {
-        await client.query("ROLLBACK");
-      } catch (rollbackError) {
-        console.warn("Could not roll back transaction on error:", rollbackError);
-      }
-      throw new Error(`Error executing access: ${error.message}`);
+      throw new Error(`Error executing sql_delete_engine: ${error.message}`);
     } finally {
       client.release();
     }
@@ -801,7 +761,6 @@ async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.info(`MCP server for PostgreSQL (enhanced) is running using database URL from ${urlSource} and connected via stdio.`);
-  console.info(`Access tool (GRANT/REVOKE): ${accessFeatureEnabled ? 'ENABLED' : 'DISABLED'} (controlled by MCP_POSTGRES_ACCESS_FEATURE)`);
 }
 
 runServer().catch(error => {

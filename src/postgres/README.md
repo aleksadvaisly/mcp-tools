@@ -1,15 +1,45 @@
-# PostgreSQL
+# PostgreSQL Enhanced
 
-A Model Context Protocol server that provides read-only access to PostgreSQL databases. This server enables LLMs to inspect database schemas and execute read-only queries.
+A Model Context Protocol server that provides comprehensive access to PostgreSQL databases. This server enables LLMs to inspect database schemas and execute various SQL operations with proper security controls.
 
 ## Components
 
 ### Tools
 
-- **query**
-  - Execute read-only SQL queries against the connected database
-  - Input: `sql` (string): The SQL query to execute
-  - All queries are executed within a READ ONLY transaction
+- **select**
+  - Execute parameterized SELECT queries against the database
+  - Input: `query` (string), `values` (array), `format` (json/text/markdown)
+  - Supports vector similarity functions for embedding columns
+  - All queries executed within READ ONLY transaction
+
+- **update**
+  - Execute parameterized INSERT and UPDATE queries
+  - Input: `query` (string), `values` (array)
+  - Supports WITH clauses for complex operations
+
+- **create**
+  - Perform schema creation and modification operations
+  - Supports: CREATE (tables, indexes, views, functions, triggers), ALTER, COMMENT ON
+  - Input: `query` (string) - supports multiple statements with semicolons
+  - Batch operations supported
+
+- **schema**
+  - Retrieve comprehensive database schema information
+  - Returns: tables, columns, indexes, triggers, foreign keys, primary keys
+  - Input: `glob_pattern` (string) - filter table names with glob patterns
+  - Includes vector dimension information for pgvector columns
+
+- **delete**
+  - Perform destructive operations: DELETE (with WHERE), DROP, TRUNCATE
+  - Input: `query` (string), `answer` (string) - confirmation required
+  - DELETE statements must include WHERE clause for safety
+  - Supports multiple statements with semicolons
+
+- **access** ⚠️ *Optional - requires MCP_POSTGRES_ACCESS_FEATURE=true*
+  - Manage database permissions: GRANT and REVOKE statements
+  - Input: `query` (string), `answer` (string) - confirmation required
+  - High-security operations with strict access control
+  - Supports multiple statements with semicolons
 
 ### Resources
 
@@ -19,6 +49,11 @@ The server provides schema information for each table in the database:
   - JSON schema information for each table
   - Includes column names and data types
   - Automatically discovered from database metadata
+
+## Environment Variables
+
+- `POSTGRES_URL` - Database connection string (alternative to command line argument)
+- `MCP_POSTGRES_ACCESS_FEATURE` - Set to `true` to enable access tool (GRANT/REVOKE operations)
 
 ## Configuration
 
@@ -40,8 +75,10 @@ To use this server with the Claude Desktop app, add the following configuration 
         "run", 
         "-i", 
         "--rm", 
+        "-e", "MCP_POSTGRES_ACCESS_FEATURE=true",
         "mcp/postgres", 
-        "postgresql://host.docker.internal:5432/mydb"]
+        "postgresql://host.docker.internal:5432/mydb"
+      ]
     }
   }
 }
@@ -58,7 +95,10 @@ To use this server with the Claude Desktop app, add the following configuration 
         "-y",
         "@modelcontextprotocol/server-postgres",
         "postgresql://localhost/mydb"
-      ]
+      ],
+      "env": {
+        "MCP_POSTGRES_ACCESS_FEATURE": "true"
+      }
     }
   }
 }
@@ -101,6 +141,7 @@ Optionally, you can add it to a file called `.vscode/mcp.json` in your workspace
           "run",
           "-i",
           "--rm",
+          "-e", "MCP_POSTGRES_ACCESS_FEATURE=true",
           "mcp/postgres",
           "${input:pg_url}"
         ]
@@ -129,12 +170,56 @@ Optionally, you can add it to a file called `.vscode/mcp.json` in your workspace
           "-y",
           "@modelcontextprotocol/server-postgres",
           "${input:pg_url}"
-        ]
+        ],
+        "env": {
+          "MCP_POSTGRES_ACCESS_FEATURE": "true"
+        }
       }
     }
   }
 }
 ```
+
+## Usage Examples
+
+### Basic Operations
+
+```javascript
+// Select with parameters
+{
+  "tool": "select",
+  "arguments": {
+    "query": "SELECT * FROM users WHERE age > $1 AND city = $2 LIMIT $3",
+    "values": [25, "Warsaw", 10],
+    "format": "json"
+  }
+}
+
+// Insert with batch operations
+{
+  "tool": "update", 
+  "arguments": {
+    "query": "INSERT INTO articles (title, content) VALUES ($1, $2); UPDATE stats SET count = count + 1;",
+    "values": ["New Article", "Article content..."]
+  }
+}
+
+// Create function and trigger
+{
+  "tool": "create",
+  "arguments": {
+    "query": "CREATE OR REPLACE FUNCTION update_timestamp() RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER update_users_timestamp BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_timestamp();"
+  }
+}
+```
+
+### Security Features
+
+- **Parameterized queries** prevent SQL injection
+- **Transaction safety** with automatic rollback on errors
+- **Confirmation required** for destructive operations
+- **Access control** via environment variables
+- **WHERE clause enforcement** for DELETE operations
 
 ## Building
 
