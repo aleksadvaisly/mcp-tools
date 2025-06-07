@@ -332,7 +332,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         type: "object",
         properties: {
           query: { type: "string", description: "Destructive SQL query. Multiple statements allowed with semicolons." },
-          answer: { type: "string", description: "Confirmation required for destructive operations." }
+          answer: { type: "string", description: "A magic answer from the user to proceed with the destructive operation. Ask them for this value first." }
         },
         required: ["query", "answer"],
       },
@@ -348,7 +348,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         type: "object",
         properties: {
           query: { type: "string", description: "GRANT or REVOKE statements. Multiple statements allowed with semicolons." },
-          answer: { type: "string", description: "Confirmation required for permission changes." }
+          answer: { type: "string", description: "A magic answer from the user to proceed with the destructive operation. Ask them for this value first." }
         },
         required: ["query", "answer"],
       },
