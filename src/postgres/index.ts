@@ -66,13 +66,15 @@ const pool = new pg.Pool({
 
 const SCHEMA_PATH = "schema";
 
-// Funkcja do bezpiecznego dzielenia zapytań SQL na średnikach, ignorując średniki wewnątrz stringów i identyfikatorów
+// Funkcja do bezpiecznego dzielenia zapytań SQL na średnikach, ignorując średniki wewnątrz stringów, identyfikatorów i dollar-quoted strings
 const splitSqlStatements = (fullSql: string): string[] => {
   const statements: string[] = [];
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inBlockComment = false;
   let inLineComment = false;
+  let inDollarQuote = false;
+  let dollarQuoteTag = '';
   let currentStatement = '';
 
   for (let i = 0; i < fullSql.length; i++) {
@@ -80,7 +82,7 @@ const splitSqlStatements = (fullSql: string): string[] => {
     const nextChar = fullSql[i + 1];
 
     // Obsługa komentarzy blokowych /* ... */
-    if (char === '/' && nextChar === '*' && !inSingleQuote && !inDoubleQuote && !inLineComment) {
+    if (char === '/' && nextChar === '*' && !inSingleQuote && !inDoubleQuote && !inDollarQuote && !inLineComment) {
       inBlockComment = true;
       currentStatement += char;
       i++; // Przesuń wskaźnik o jeden, aby pominąć '*'
@@ -96,7 +98,7 @@ const splitSqlStatements = (fullSql: string): string[] => {
     }
 
     // Obsługa komentarzy liniowych --
-    if (char === '-' && nextChar === '-' && !inSingleQuote && !inDoubleQuote && !inBlockComment) {
+    if (char === '-' && nextChar === '-' && !inSingleQuote && !inDoubleQuote && !inDollarQuote && !inBlockComment) {
       inLineComment = true;
       currentStatement += char;
       i++; // Przesuń wskaźnik o jeden, aby pominąć '-'
@@ -110,6 +112,50 @@ const splitSqlStatements = (fullSql: string): string[] => {
     }
 
     if (inBlockComment || inLineComment) {
+      currentStatement += char;
+      continue;
+    }
+
+    // Obsługa dollar-quoted strings $tag$...$tag$
+    if (char === '$' && !inSingleQuote && !inDoubleQuote) {
+      if (!inDollarQuote) {
+        // Rozpoczęcie dollar-quoted string - znajdź tag
+        let tagEnd = i + 1;
+        while (tagEnd < fullSql.length && fullSql[tagEnd] !== '$') {
+          tagEnd++;
+        }
+        if (tagEnd < fullSql.length) {
+          const tag = fullSql.substring(i + 1, tagEnd);
+          dollarQuoteTag = tag;
+          inDollarQuote = true;
+          // Dodaj całą sekwencję $tag$ do current statement
+          const dollarStart = fullSql.substring(i, tagEnd + 1);
+          currentStatement += dollarStart;
+          i = tagEnd; // Przesuń wskaźnik na koniec $tag$
+          continue;
+        }
+      } else {
+        // Sprawdź czy to koniec dollar-quoted string
+        let tagEnd = i + 1;
+        while (tagEnd < fullSql.length && fullSql[tagEnd] !== '$') {
+          tagEnd++;
+        }
+        if (tagEnd < fullSql.length) {
+          const tag = fullSql.substring(i + 1, tagEnd);
+          if (tag === dollarQuoteTag) {
+            inDollarQuote = false;
+            dollarQuoteTag = '';
+            // Dodaj całą sekwencję $tag$ do current statement
+            const dollarEnd = fullSql.substring(i, tagEnd + 1);
+            currentStatement += dollarEnd;
+            i = tagEnd; // Przesuń wskaźnik na koniec $tag$
+            continue;
+          }
+        }
+      }
+    }
+
+    if (inDollarQuote) {
       currentStatement += char;
       continue;
     }
@@ -128,8 +174,8 @@ const splitSqlStatements = (fullSql: string): string[] => {
       continue;
     }
 
-    // Dzielenie na średnikach poza cudzysłowami
-    if (char === ';' && !inSingleQuote && !inDoubleQuote) {
+    // Dzielenie na średnikach poza cudzysłowami i dollar-quoted strings
+    if (char === ';' && !inSingleQuote && !inDoubleQuote && !inDollarQuote) {
       const trimmedStatement = currentStatement.trim();
       if (trimmedStatement.length > 0) {
         statements.push(trimmedStatement);
