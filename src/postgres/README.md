@@ -13,9 +13,10 @@ A Model Context Protocol server that provides comprehensive access to PostgreSQL
   - All queries executed within READ ONLY transaction
 
 - **update**
-  - Execute parameterized INSERT and UPDATE queries
+  - Execute parameterized INSERT, UPDATE queries, and DO blocks
   - Input: `query` (string), `values` (array)
   - Supports WITH clauses for complex operations
+  - Supports anonymous PL/pgSQL blocks with DO statement
 
 - **create**
   - Perform schema creation and modification operations
@@ -201,6 +202,14 @@ Optionally, you can add it to a file called `.vscode/mcp.json` in your workspace
   "arguments": {
     "query": "INSERT INTO articles (title, content) VALUES ($1, $2); UPDATE stats SET count = count + 1;",
     "values": ["New Article", "Article content..."]
+  }
+}
+
+// Anonymous PL/pgSQL block
+{
+  "tool": "update",
+  "arguments": {
+    "query": "DO $ DECLARE entry_record RECORD; BEGIN FOR entry_record IN SELECT id, content FROM application_entries WHERE content IS NOT NULL LOOP PERFORM insert_application_entries_embed(entry_record.id, entry_record.content); END LOOP; END $"
   }
 }
 

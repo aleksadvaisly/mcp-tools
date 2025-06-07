@@ -282,13 +282,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: "update",
-      description: `Perform parameterized INSERT and UPDATE queries. Use placeholders and values array for safe parameter binding.`,
+      description: `Perform parameterized INSERT, UPDATE queries, and DO blocks. Use placeholders and values array for safe parameter binding. Supports anonymous PL/pgSQL blocks with DO statement.`,
       inputSchema: {
         type: "object",
         properties: {
           query: {
             type: "string",
-            description: "The INSERT or UPDATE query with placeholders."
+            description: "INSERT, UPDATE query, or DO block with placeholders."
           },
           values: {
             type: "array",
@@ -431,10 +431,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const isUpdate = queryNormalized.includes("update ");
     const isInsert = queryNormalized.includes("insert into ");
     const startsWithWith = queryNormalized.startsWith("with ");
+    const startsWithDo = queryNormalized.startsWith("do ");
 
-    if (!startsWithWith && !isUpdate && !isInsert) {
+    if (!startsWithWith && !startsWithDo && !isUpdate && !isInsert) {
       return {
-        content: [{ type: "text", text: "Only UPDATE or INSERT queries (optionally starting with WITH) are allowed with update tool." }],
+        content: [{ type: "text", text: "Only UPDATE, INSERT, DO blocks, or queries starting with WITH are allowed with update tool." }],
         isError: true,
       };
     }
