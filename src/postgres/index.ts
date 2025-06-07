@@ -317,7 +317,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
-          glob_pattern: {
+          filter: {
             type: "string",
             default: "*",
             description: "Glob pattern to filter table names (* for all)."
@@ -331,7 +331,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
-          glob_pattern: {
+          filter: {
             type: "string",
             default: "*",
             description: "Glob pattern to filter table names (* for all)."
@@ -566,7 +566,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   
   else if (name === "schema") {
-    const globPattern = args?.glob_pattern as string || "*";
+    const globPattern = args?.filter as string || "*";
     const client = await pool.connect();
 
     try {
@@ -754,7 +754,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   
   else if (name === "rls_policies") {
-    const globPattern = args?.glob_pattern as string || "*";
+    const globPattern = args?.filter as string || "*";
     const format = (args?.format as string || "json").toLowerCase();
     
     // Konwertuj glob pattern na SQL LIKE pattern
