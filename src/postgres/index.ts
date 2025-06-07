@@ -326,6 +326,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
     },
     {
+      name: "rls_policies",
+      description: `Get Row Level Security (RLS) policies information from the database. Returns policy details including commands, conditions, and target tables.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          format: {
+            type: "string",
+            enum: ["json", "text", "markdown"],
+            default: "json",
+            description: "Output format: json (default), text, or markdown."
+          },
+        },
+      },
+    },
+    {
       name: "delete",
       description: `Perform destructive operations: DELETE (with WHERE), DROP, TRUNCATE. Requires confirmation. Supports multiple statements.`,
       inputSchema: {
@@ -728,6 +743,82 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     } catch (error: any) {
       throw new Error(`Error executing schema: ${error.message}`);
+    } finally {
+      client.release();
+    }
+  }
+  
+  else if (name === "rls_policies") {
+    const format = (args?.format as string || "json").toLowerCase();
+    
+    const rlsQuery = `
+SELECT
+  p.polname AS policy_name,
+  c.relname AS table_name,
+  CASE p.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'ALL'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    WHEN 'i' THEN 'INSERT'
+    ELSE p.polcmd::text
+  END AS command,
+  p.polpermissive AS is_permissive,
+  pg_get_expr(p.polqual, c.oid) AS using_clause,
+  pg_get_expr(p.polwithcheck, c.oid) AS with_check_clause,
+  n.nspname AS schema_name
+FROM
+  pg_policy p
+JOIN
+  pg_class c ON p.polrelid = c.oid
+JOIN
+  pg_namespace n ON c.relnamespace = n.oid
+WHERE
+  n.nspname = 'public'
+ORDER BY
+  schema_name, table_name, policy_name`;
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN TRANSACTION READ ONLY");
+      const result = await client.query(rlsQuery);
+      await client.query("ROLLBACK");
+
+      let outputText: string;
+
+      if (format === "json") {
+        outputText = JSON.stringify(result.rows, null, 2);
+      } else if (format === "text") {
+        outputText = result.rows.map(row =>
+          `Policy: ${row.policy_name}\nTable: ${row.table_name}\nCommand: ${row.command}\nPermissive: ${row.is_permissive}\nUsing: ${row.using_clause || 'N/A'}\nWith Check: ${row.with_check_clause || 'N/A'}\n`
+        ).join('\n');
+      } else if (format === "markdown") {
+        if (result.rows.length === 0) {
+          outputText = "No RLS policies found.";
+        } else {
+          const headers = ['policy_name', 'table_name', 'command', 'is_permissive', 'using_clause', 'with_check_clause'];
+          const headerLine = `| ${headers.join(" | ")} |`;
+          const separatorLine = `| ${headers.map(() => "---").join(" | ")} |`;
+          const dataLines = result.rows.map(row =>
+            `| ${headers.map(header => String(row[header] ?? "N/A")).join(" | ")} |`
+          ).join("\n");
+          outputText = `${headerLine}\n${separatorLine}\n${dataLines}`;
+        }
+      } else {
+        throw new Error(`Unsupported format: ${format}`);
+      }
+
+      return {
+        content: [{ type: "text", text: outputText }],
+        isError: false,
+      };
+    } catch (error: any) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.warn("Could not roll back transaction on error:", rollbackError);
+      }
+      throw new Error(`Error executing rls_policies: ${error.message}`);
     } finally {
       client.release();
     }

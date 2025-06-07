@@ -30,6 +30,12 @@ A Model Context Protocol server that provides comprehensive access to PostgreSQL
   - Input: `glob_pattern` (string) - filter table names with glob patterns
   - Includes vector dimension information for pgvector columns
 
+- **rls_policies**
+  - Get Row Level Security (RLS) policies information
+  - Returns: policy details including commands, conditions, and target tables
+  - Input: `format` (json/text/markdown) - output format
+  - Shows policy names, target tables, commands, and security clauses
+
 - **delete**
   - Perform destructive operations: DELETE (with WHERE), DROP, TRUNCATE
   - Input: `query` (string), `answer` (string) - confirmation required
@@ -217,7 +223,15 @@ Optionally, you can add it to a file called `.vscode/mcp.json` in your workspace
 {
   "tool": "create",
   "arguments": {
-    "query": "CREATE OR REPLACE FUNCTION update_timestamp() RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER update_users_timestamp BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_timestamp();"
+    "query": "CREATE OR REPLACE FUNCTION update_timestamp() RETURNS TRIGGER AS $ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $ LANGUAGE plpgsql; CREATE TRIGGER update_users_timestamp BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_timestamp();"
+  }
+}
+
+// Get RLS policies information
+{
+  "tool": "rls_policies",
+  "arguments": {
+    "format": "markdown"
   }
 }
 ```
